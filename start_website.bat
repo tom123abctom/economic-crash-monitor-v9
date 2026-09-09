@@ -6,7 +6,7 @@ echo =======================================================================
 cd /d "%~dp0"
 
 echo 1. Starting Local Web Engine Server...
-start /b .venv\Scripts\streamlit.exe run app\dashboard\main.py --server.port 8501 --server.headless true
+start /b .venv\Scripts\streamlit.exe run streamlit_app.py --server.port 8501 --server.headless true
 
 timeout /t 3 /nobreak >nul
 
