@@ -1,7 +1,9 @@
 import os
 import sys
-import sqlite3
-import yaml
+try:
+    import yaml
+except ImportError:
+    yaml = None
 import requests
 import numpy as np
 import pandas as pd
@@ -209,14 +211,15 @@ from typing import Dict, Tuple, List
 
 # Multi-level fallback path for config.yaml (supports modular and single-file mode)
 def load_config() -> Dict:
-    try:
-        if os.path.exists(CONFIG_PATH):
-            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-                cfg = yaml.safe_load(f)
-                if cfg:
-                    return cfg
-    except Exception:
-        pass
+    if yaml is not None:
+        try:
+            if os.path.exists(CONFIG_PATH):
+                with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                    cfg = yaml.safe_load(f)
+                    if cfg:
+                        return cfg
+        except Exception:
+            pass
 
     # Embedded fallback config if config.yaml is missing or path invalid
     return {
@@ -1887,9 +1890,9 @@ def main():
 
         3. **Stage 3 — Multi-Factor Synergy Escalation (+0 to +15 pts)**:
            When multiple sectors flash warning signs at the exact same time, risk compounds exponentially. The engine adds extra penalty points:
-           - **+5 Pts**: 3 or more categories cross into HIGH risk ($\ge 60$)
-           - **+5 Pts**: 5 or more categories cross into HIGH risk ($\ge 60$)
-           - **+5 Pts**: Yield Curve Inversion ($\ge 70$) occurs alongside Credit Spread Widening ($\ge 60$)
+           - **+5 Pts**: 3 or more categories cross into HIGH risk (>= 60)
+           - **+5 Pts**: 5 or more categories cross into HIGH risk (>= 60)
+           - **+5 Pts**: Yield Curve Inversion (>= 70) occurs alongside Credit Spread Widening (>= 60)
 
         4. **Stage 4 — Dynamic Vulnerability Weighting**:
            Combines overall 10-sector weighted average (50%), the top 3 highest stress sectors (35%), and the maximum single sector vulnerability (15%) to ensure localized bubbles (like 2000 IPOs or 2007 Housing) are captured accurately without artificial score clamping.
