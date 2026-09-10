@@ -67,7 +67,12 @@ DB_PATH = get_writable_db_path()
 CONFIG_PATH = resolve_path("config/config.yaml")
 SCHEMA_PATH = resolve_path("database/schema.sql")
 
+import threading
+import time
+
+_DB_LOCK = threading.Lock()
 _GLOBAL_CONN = None
+_DB_INITIALIZED = False
 
 def get_connection():
     global _GLOBAL_CONN
@@ -79,12 +84,22 @@ def get_connection():
             os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
             _GLOBAL_CONN = sqlite3.connect(DB_PATH, timeout=60.0, check_same_thread=False)
             _GLOBAL_CONN.row_factory = sqlite3.Row
+            try:
+                _GLOBAL_CONN.execute("PRAGMA journal_mode=WAL;")
+                _GLOBAL_CONN.execute("PRAGMA busy_timeout=60000;")
+            except Exception:
+                pass
             return _GLOBAL_CONN
         except Exception:
             pass
 
     _GLOBAL_CONN = sqlite3.connect("file:memdb1?mode=memory&cache=shared", uri=True, check_same_thread=False)
     _GLOBAL_CONN.row_factory = sqlite3.Row
+    try:
+        _GLOBAL_CONN.execute("PRAGMA journal_mode=WAL;")
+        _GLOBAL_CONN.execute("PRAGMA busy_timeout=60000;")
+    except Exception:
+        pass
     return _GLOBAL_CONN
 
 def safe_close(conn):
@@ -137,32 +152,55 @@ CREATE TABLE IF NOT EXISTS alert_logs (
 """
 
 def init_db():
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.executescript(EMBEDDED_SCHEMA_SQL)
-    conn.commit()
+    global _DB_INITIALIZED
+    if _DB_INITIALIZED:
+        return
+    with _DB_LOCK:
+        for attempt in range(5):
+            try:
+                conn = get_connection()
+                cursor = conn.cursor()
+                cursor.executescript(EMBEDDED_SCHEMA_SQL)
+                conn.commit()
+                _DB_INITIALIZED = True
+                break
+            except Exception as e:
+                if "locked" in str(e).lower() and attempt < 4:
+                    time.sleep(0.5 * (attempt + 1))
+                else:
+                    _DB_INITIALIZED = True
+                    break
 
 def save_raw_observations(observations: List[Dict]):
     if not observations:
         return
-    conn = get_connection()
-    cursor = conn.cursor()
-    data = [
-        (
-            obs["indicator_code"],
-            obs["observation_date"],
-            obs["value"],
-            obs["frequency"],
-            obs["source"],
-            obs.get("is_preliminary", 0)
-        ) for obs in observations
-    ]
-    cursor.executemany("""
-        INSERT OR REPLACE INTO raw_observations
-        (indicator_code, observation_date, value, frequency, source, is_preliminary)
-        VALUES (?, ?, ?, ?, ?, ?)
-    """, data)
-    conn.commit()
+    with _DB_LOCK:
+        for attempt in range(5):
+            try:
+                conn = get_connection()
+                cursor = conn.cursor()
+                data = [
+                    (
+                        obs["indicator_code"],
+                        obs["observation_date"],
+                        obs["value"],
+                        obs["frequency"],
+                        obs["source"],
+                        obs.get("is_preliminary", 0)
+                    ) for obs in observations
+                ]
+                cursor.executemany("""
+                    INSERT OR REPLACE INTO raw_observations
+                    (indicator_code, observation_date, value, frequency, source, is_preliminary)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, data)
+                conn.commit()
+                break
+            except Exception as e:
+                if "locked" in str(e).lower() and attempt < 4:
+                    time.sleep(0.5 * (attempt + 1))
+                else:
+                    break
 
 def get_raw_observations(indicator_code: str) -> pd.DataFrame:
     init_db()
@@ -179,26 +217,35 @@ def get_raw_observations(indicator_code: str) -> pd.DataFrame:
 def save_processed_indicators(df: pd.DataFrame, indicator_code: str):
     if df.empty:
         return
-    conn = get_connection()
-    cursor = conn.cursor()
-    data = [
-        (
-            indicator_code,
-            str(row["observation_date"])[:10],
-            row.get("raw_value"),
-            row.get("risk_score"),
-            row.get("warning_level"),
-            row.get("change_1m"),
-            row.get("change_3m"),
-            row.get("change_1y")
-        ) for _, row in df.iterrows()
-    ]
-    cursor.executemany("""
-        INSERT OR REPLACE INTO processed_indicators
-        (indicator_code, observation_date, raw_value, risk_score, warning_level, change_1m, change_3m, change_1y)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    """, data)
-    conn.commit()
+    with _DB_LOCK:
+        for attempt in range(5):
+            try:
+                conn = get_connection()
+                cursor = conn.cursor()
+                data = [
+                    (
+                        indicator_code,
+                        str(row["observation_date"])[:10],
+                        row.get("raw_value"),
+                        row.get("risk_score"),
+                        row.get("warning_level"),
+                        row.get("change_1m"),
+                        row.get("change_3m"),
+                        row.get("change_1y")
+                    ) for _, row in df.iterrows()
+                ]
+                cursor.executemany("""
+                    INSERT OR REPLACE INTO processed_indicators
+                    (indicator_code, observation_date, raw_value, risk_score, warning_level, change_1m, change_3m, change_1y)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """, data)
+                conn.commit()
+                break
+            except Exception as e:
+                if "locked" in str(e).lower() and attempt < 4:
+                    time.sleep(0.5 * (attempt + 1))
+                else:
+                    break
 
 if __name__ == "__main__":
     init_db()
@@ -1060,12 +1107,14 @@ def run_historical_backtest() -> Tuple[pd.DataFrame, pd.DataFrame]:
             processed_dfs["housing_price_income"] = df_ratio
 
     # Build Monthly Risk Matrix
-    master_df = pd.DataFrame()
+    series_dict = {}
     for code, df in processed_dfs.items():
         df_c = df.copy()
         df_c["observation_date"] = pd.to_datetime(df_c["observation_date"])
         s = df_c.set_index("observation_date")["risk_score"].rename(code)
-        master_df = pd.concat([master_df, s], axis=1)
+        series_dict[code] = s
+
+    master_df = pd.DataFrame(series_dict) if series_dict else pd.DataFrame()
 
     if not master_df.empty:
         master_df.index = pd.to_datetime(master_df.index)
